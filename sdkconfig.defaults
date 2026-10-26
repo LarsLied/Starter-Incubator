@@ -1,0 +1,6 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# 1 ms tick gives usable resolution for short delays and pdMS_TO_TICKS()
+CONFIG_FREERTOS_HZ=1000
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

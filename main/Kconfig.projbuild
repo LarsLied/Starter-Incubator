@@ -1,0 +1,136 @@
+menu "Sourdough Incubator"
+
+    menu "Pins"
+        comment "Avoid strapping (0, 3, 45, 46), USB (19, 20) and flash/PSRAM (26-37) pins"
+
+        config HX711_DOUT_GPIO
+            int "HX711 DOUT GPIO"
+            range 0 48
+            default 4
+
+        config HX711_SCK_GPIO
+            int "HX711 SCK GPIO"
+            range 0 48
+            default 5
+
+        config DHT22_GPIO
+            int "DHT22 DATA GPIO"
+            range 0 48
+            default 6
+
+        config JSN_SR04T_TRIG_GPIO
+            int "JSN-SR04T TRIG GPIO"
+            range 0 48
+            default 7
+
+        config JSN_SR04T_ECHO_GPIO
+            int "JSN-SR04T ECHO GPIO"
+            range 0 48
+            default 15
+
+        config GC9A01_SCLK_GPIO
+            int "GC9A01 SCLK GPIO"
+            range 0 48
+            default 12
+
+        config GC9A01_MOSI_GPIO
+            int "GC9A01 MOSI GPIO"
+            range 0 48
+            default 11
+
+        config GC9A01_CS_GPIO
+            int "GC9A01 CS GPIO"
+            range 0 48
+            default 10
+
+        config GC9A01_DC_GPIO
+            int "GC9A01 DC GPIO"
+            range 0 48
+            default 9
+
+        config GC9A01_RST_GPIO
+            int "GC9A01 RST GPIO"
+            range 0 48
+            default 8
+
+        config PELTIER_PWM_GPIO
+            int "Peltier PWM GPIO (placeholder)"
+            range 0 48
+            default 16
+
+        config PELTIER_DIR_GPIO
+            int "Peltier DIR GPIO (placeholder)"
+            range 0 48
+            default 17
+    endmenu
+
+    menu "Sensors"
+        comment "Disable sensors that are not connected to avoid warnings every sample"
+
+        config SENSOR_WEIGHT_ENABLE
+            bool "Enable HX711 load cell"
+            default y
+
+        config SENSOR_DISTANCE_ENABLE
+            bool "Enable JSN-SR04T distance sensor"
+            default y
+    endmenu
+
+    menu "Sampling"
+        config SAMPLE_INTERVAL_MS
+            int "Sensor sample interval (ms)"
+            range 2000 3600000
+            default 5000
+            help
+                Period of the sensor_manager task. Minimum 2000 ms because the
+                DHT22 cannot be read faster than every 2 s.
+
+        config HX711_SAMPLES
+            int "HX711 samples averaged per reading"
+            range 1 80
+            default 10
+            help
+                With RATE pin low the HX711 runs at 10 SPS, so 10 samples take ~1 s.
+
+        config DISTANCE_SAMPLES
+            int "JSN-SR04T samples per reading (median)"
+            range 1 15
+            default 5
+    endmenu
+
+    menu "Calibration"
+        config HX711_COUNTS_PER_GRAM_X100
+            int "HX711 scale factor (raw counts per gram x 100)"
+            range 1 100000000
+            default 42000
+            help
+                Kconfig has no floats, so the value is stored x100.
+                Calibrate: tare with empty scale, put a known mass M (g) on it,
+                read the raw counts R from the log and set (R - offset) / M * 100.
+
+        config HX711_TARE_ON_BOOT
+            bool "Tare the scale at boot"
+            default y
+            help
+                Zeroes the scale on startup. Make sure the scale is empty when
+                powering on. Later this should come from NVS instead.
+
+        config DHT22_INTERNAL_PULLUP
+            bool "Enable internal pull-up on DHT22 data line"
+            default n
+            help
+                The 3-pin DHT22 module has a 5.1 kOhm pull-up on board, so the
+                internal pull-up (~45 kOhm) is not needed. Enable it only for a
+                bare sensor without an external pull-up.
+
+        config DISTANCE_TEMP_COMPENSATION
+            bool "Compensate speed of sound with DHT22 air temperature"
+            default y
+
+        config DISTANCE_DEFAULT_TEMP_C
+            int "Air temperature used when DHT22 is unavailable (C)"
+            range -20 60
+            default 20
+    endmenu
+
+endmenu
