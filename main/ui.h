@@ -14,3 +14,6 @@ void ui_show_snapshot(const sensor_snapshot_t *snap);
 
 /** @brief Update the weight on screen. Cheap to call often: redraws only on change. */
 void ui_show_weight(bool valid, float grams);
+
+/** @brief Update the distance on screen. Cheap to call often: redraws only on change. */
+void ui_show_distance(bool valid, uint32_t distance_mm);

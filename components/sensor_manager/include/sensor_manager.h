@@ -44,9 +44,9 @@ esp_err_t sensor_manager_init(void);
 /**
  * @brief Start the sampling tasks.
  *
- * Climate and distance are sampled every CONFIG_SAMPLE_INTERVAL_MS. The scale
- * has its own faster task (CONFIG_WEIGHT_INTERVAL_MS); snapshots carry its
- * latest reading.
+ * Climate is sampled every CONFIG_SAMPLE_INTERVAL_MS. The scale and the
+ * distance sensor have their own faster tasks (CONFIG_WEIGHT_INTERVAL_MS,
+ * CONFIG_DISTANCE_INTERVAL_MS); snapshots carry their latest readings.
  */
 esp_err_t sensor_manager_start(void);
 
@@ -57,6 +57,14 @@ esp_err_t sensor_manager_start(void);
  *         ESP_ERR_NOT_FOUND before the first reading, or the last read error.
  */
 esp_err_t sensor_manager_get_weight(float *grams);
+
+/**
+ * @brief Latest distance from the fast distance task, without waiting.
+ * @param[out] distance_mm  Sensor face to target in mm (only written on ESP_OK).
+ * @return ESP_OK, ESP_ERR_INVALID_STATE if the sensor is not available,
+ *         ESP_ERR_NOT_FOUND before the first reading, or the last read error.
+ */
+esp_err_t sensor_manager_get_distance(uint32_t *distance_mm);
 
 /**
  * @brief Block until a new snapshot is available and consume it.

@@ -49,6 +49,10 @@ static void app_task(void *arg)
         const bool weight_ok = (sensor_manager_get_weight(&grams) == ESP_OK);
         ui_show_weight(weight_ok, grams);
 
+        uint32_t distance_mm = 0;
+        const bool distance_ok = (sensor_manager_get_distance(&distance_mm) == ESP_OK);
+        ui_show_distance(distance_ok, distance_mm);
+
         if (sensor_manager_wait_next(&snap, 0) == ESP_OK) {
             log_snapshot(&snap);
             ui_show_snapshot(&snap);

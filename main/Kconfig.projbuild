@@ -103,10 +103,21 @@ menu "Sourdough Incubator"
                 so keep samples x 100 ms <= WEIGHT_INTERVAL_MS. More samples
                 give less noise but slower updates.
 
+        config DISTANCE_INTERVAL_MS
+            int "Distance sample interval (ms)"
+            range 100 60000
+            default 200
+            help
+                The distance sensor is read in its own task, independent of
+                SAMPLE_INTERVAL_MS. The full snapshot copies the latest value.
+
         config DISTANCE_SAMPLES
             int "JSN-SR04T samples per reading (median)"
             range 1 15
-            default 5
+            default 3
+            help
+                The sensor needs ~60 ms between pings, so N samples take about
+                (N - 1) x 60 ms. Keep that below DISTANCE_INTERVAL_MS.
     endmenu
 
     menu "Calibration"

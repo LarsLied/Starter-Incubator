@@ -19,7 +19,17 @@ static const char *TAG = "sensor_mgr";
 #define DHT22_WARMUP_MS         DHT22_MIN_INTERVAL_MS
 #define WEIGHT_TASK_STACK       3072
 #define WEIGHT_TASK_PRIORITY    5
+#define DISTANCE_TASK_STACK     3072
+#define DISTANCE_TASK_PRIORITY  5
 #define HX711_TARE_SAMPLES      10      // Tare is rare, so average more than a normal reading
+
+/*
+ * The DHT22 and HX711 drivers disable interrupts on their core while
+ * bit-banging (up to ~5 ms for the DHT22). The JSN-SR04T echo ISR runs on the
+ * core that installed it (core 0, from app_main), so keep the bit-banging
+ * tasks on the last core or they would delay echo timestamps.
+ */
+#define BITBANG_CORE            (CONFIG_FREERTOS_NUMBER_OF_CORES - 1)
 
 typedef struct {
     float grams;
@@ -27,14 +37,21 @@ typedef struct {
     esp_err_t err;                  // ESP_OK when grams/raw are valid
 } weight_reading_t;
 
+typedef struct {
+    uint32_t mm;
+    esp_err_t err;                  // ESP_OK when mm is valid
+} distance_reading_t;
+
 static QueueHandle_t s_queue;       // length 1, always holds the newest snapshot
 static SemaphoreHandle_t s_hx711_lock;
 static TaskHandle_t s_task;
 static TaskHandle_t s_weight_task;
+static TaskHandle_t s_distance_task;
 
-// Latest scale reading, written by weight_task, read by everyone else
+// Latest fast readings, written by weight_task / distance_task, read by everyone else
 static weight_reading_t s_weight = { .err = ESP_ERR_NOT_FOUND };
-static portMUX_TYPE s_weight_mux = portMUX_INITIALIZER_UNLOCKED;
+static distance_reading_t s_distance = { .err = ESP_ERR_NOT_FOUND };
+static portMUX_TYPE s_latest_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // Set when the driver initialized OK
 static bool s_weight_available;
@@ -52,49 +69,51 @@ static esp_err_t init_distance(void)
         .trig_gpio = CONFIG_JSN_SR04T_TRIG_GPIO,
         .echo_gpio = CONFIG_JSN_SR04T_ECHO_GPIO,
     };
-    return jsn_sr04t_init(&cfg);
+    esp_err_t err = jsn_sr04t_init(&cfg);
+#if CONFIG_DISTANCE_TEMP_COMPENSATION
+    // Until the first DHT22 reading arrives
+    jsn_sr04t_set_air_temp_c((float)CONFIG_DISTANCE_DEFAULT_TEMP_C);
+#endif
+    return err;
 }
 #endif
 
-static esp_err_t read_distance(float air_temp_c, uint32_t *distance_mm)
+static esp_err_t read_distance(uint32_t *distance_mm)
 {
-#if CONFIG_DISTANCE_TEMP_COMPENSATION
-    jsn_sr04t_set_air_temp_c(air_temp_c);
-#else
-    (void)air_temp_c;
-#endif
     return jsn_sr04t_measure_median_mm(CONFIG_DISTANCE_SAMPLES, distance_mm);
 }
 
 static void sample_all(sensor_snapshot_t *snap)
 {
-    esp_err_t err;
     snap->timestamp_us = esp_timer_get_time();
 
-    // Climate first: the temperature is used to compensate the distance reading
     // Errors are passed on in climate_err and reported by the app
     snap->climate_err = s_climate_available
                         ? dht22_read(&snap->temp_c, &snap->humidity_pct)
                         : ESP_ERR_INVALID_STATE;
     snap->climate_valid = (snap->climate_err == ESP_OK);
 
-    if (s_distance_available) {
-        const float air_temp = snap->climate_valid ? snap->temp_c : (float)CONFIG_DISTANCE_DEFAULT_TEMP_C;
-        err = read_distance(air_temp, &snap->distance_mm);
-        snap->distance_valid = (err == ESP_OK);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "distance read failed: %s", esp_err_to_name(err));
-        }
+#if CONFIG_DISTANCE_TEMP_COMPENSATION
+    // Used by distance_task from its next ping; keeps the last value on a failed read
+    if (s_distance_available && snap->climate_valid) {
+        jsn_sr04t_set_air_temp_c(snap->temp_c);
     }
+#endif
 
-    // The scale is sampled faster in weight_task; take its latest reading
+    // Weight and distance are sampled faster in their own tasks; take the latest
+    taskENTER_CRITICAL(&s_latest_mux);
+    const weight_reading_t w = s_weight;
+    const distance_reading_t d = s_distance;
+    taskEXIT_CRITICAL(&s_latest_mux);
+
     if (s_weight_available) {
-        taskENTER_CRITICAL(&s_weight_mux);
-        const weight_reading_t w = s_weight;
-        taskEXIT_CRITICAL(&s_weight_mux);
         snap->weight_g = w.grams;
         snap->weight_raw = w.raw;
         snap->weight_valid = (w.err == ESP_OK);
+    }
+    if (s_distance_available) {
+        snap->distance_mm = d.mm;
+        snap->distance_valid = (d.err == ESP_OK);
     }
 }
 
@@ -111,9 +130,9 @@ static void weight_task(void *arg)
         }
         xSemaphoreGive(s_hx711_lock);
 
-        taskENTER_CRITICAL(&s_weight_mux);
+        taskENTER_CRITICAL(&s_latest_mux);
         s_weight = w;
-        taskEXIT_CRITICAL(&s_weight_mux);
+        taskEXIT_CRITICAL(&s_latest_mux);
 
         // Log only on change, this runs several times per second
         if (w.err != prev_err) {
@@ -126,6 +145,34 @@ static void weight_task(void *arg)
         }
 
         xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONFIG_WEIGHT_INTERVAL_MS));
+    }
+}
+
+static void distance_task(void *arg)
+{
+    esp_err_t prev_err = ESP_OK;
+    TickType_t last_wake = xTaskGetTickCount();
+    for (;;) {
+        distance_reading_t d = {0};
+        d.err = read_distance(&d.mm);
+
+        taskENTER_CRITICAL(&s_latest_mux);
+        s_distance = d;
+        taskEXIT_CRITICAL(&s_latest_mux);
+
+        // Log only on change, this runs several times per second
+        if (d.err != prev_err) {
+            if (d.err != ESP_OK) {
+                ESP_LOGW(TAG, "distance read failed: %s", esp_err_to_name(d.err));
+            } else {
+                ESP_LOGI(TAG, "distance reading again");
+            }
+            prev_err = d.err;
+        }
+
+        // The sensor needs a pause after the last ping of the median
+        vTaskDelay(pdMS_TO_TICKS(JSN_SR04T_CYCLE_MS));
+        xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONFIG_DISTANCE_INTERVAL_MS));
     }
 }
 
@@ -201,14 +248,21 @@ esp_err_t sensor_manager_start(void)
     ESP_RETURN_ON_FALSE(s_queue, ESP_ERR_INVALID_STATE, TAG, "not initialized");
     ESP_RETURN_ON_FALSE(!s_task, ESP_ERR_INVALID_STATE, TAG, "already started");
 
-    BaseType_t ok = xTaskCreate(sensor_task, "sensors", SENSOR_TASK_STACK, NULL,
-                                SENSOR_TASK_PRIORITY, &s_task);
+    // DHT22 (in sensor_task) and HX711 bit-bang, see BITBANG_CORE
+    BaseType_t ok = xTaskCreatePinnedToCore(sensor_task, "sensors", SENSOR_TASK_STACK, NULL,
+                                            SENSOR_TASK_PRIORITY, &s_task, BITBANG_CORE);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "task create failed");
 
     if (s_weight_available) {
-        ok = xTaskCreate(weight_task, "weight", WEIGHT_TASK_STACK, NULL,
-                         WEIGHT_TASK_PRIORITY, &s_weight_task);
+        ok = xTaskCreatePinnedToCore(weight_task, "weight", WEIGHT_TASK_STACK, NULL,
+                                     WEIGHT_TASK_PRIORITY, &s_weight_task, BITBANG_CORE);
         ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "weight task create failed");
+    }
+
+    if (s_distance_available) {
+        ok = xTaskCreate(distance_task, "distance", DISTANCE_TASK_STACK, NULL,
+                         DISTANCE_TASK_PRIORITY, &s_distance_task);
+        ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "distance task create failed");
     }
     return ESP_OK;
 }
@@ -219,13 +273,28 @@ esp_err_t sensor_manager_get_weight(float *grams)
     if (!s_weight_available) {
         return ESP_ERR_INVALID_STATE;
     }
-    taskENTER_CRITICAL(&s_weight_mux);
+    taskENTER_CRITICAL(&s_latest_mux);
     const weight_reading_t w = s_weight;
-    taskEXIT_CRITICAL(&s_weight_mux);
+    taskEXIT_CRITICAL(&s_latest_mux);
     if (w.err == ESP_OK) {
         *grams = w.grams;
     }
     return w.err;
+}
+
+esp_err_t sensor_manager_get_distance(uint32_t *distance_mm)
+{
+    ESP_RETURN_ON_FALSE(distance_mm, ESP_ERR_INVALID_ARG, TAG, "distance_mm is NULL");
+    if (!s_distance_available) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    taskENTER_CRITICAL(&s_latest_mux);
+    const distance_reading_t d = s_distance;
+    taskEXIT_CRITICAL(&s_latest_mux);
+    if (d.err == ESP_OK) {
+        *distance_mm = d.mm;
+    }
+    return d.err;
 }
 
 esp_err_t sensor_manager_wait_next(sensor_snapshot_t *out, TickType_t timeout)
