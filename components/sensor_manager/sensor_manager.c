@@ -17,10 +17,24 @@ static const char *TAG = "sensor_mgr";
 #define SENSOR_TASK_STACK       4096
 #define SENSOR_TASK_PRIORITY    5
 #define DHT22_WARMUP_MS         DHT22_MIN_INTERVAL_MS
+#define WEIGHT_TASK_STACK       3072
+#define WEIGHT_TASK_PRIORITY    5
+#define HX711_TARE_SAMPLES      10      // Tare is rare, so average more than a normal reading
+
+typedef struct {
+    float grams;
+    int32_t raw;
+    esp_err_t err;                  // ESP_OK when grams/raw are valid
+} weight_reading_t;
 
 static QueueHandle_t s_queue;       // length 1, always holds the newest snapshot
 static SemaphoreHandle_t s_hx711_lock;
 static TaskHandle_t s_task;
+static TaskHandle_t s_weight_task;
+
+// Latest scale reading, written by weight_task, read by everyone else
+static weight_reading_t s_weight = { .err = ESP_ERR_NOT_FOUND };
+static portMUX_TYPE s_weight_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // Set when the driver initialized OK
 static bool s_weight_available;
@@ -73,17 +87,45 @@ static void sample_all(sensor_snapshot_t *snap)
         }
     }
 
+    // The scale is sampled faster in weight_task; take its latest reading
     if (s_weight_available) {
+        taskENTER_CRITICAL(&s_weight_mux);
+        const weight_reading_t w = s_weight;
+        taskEXIT_CRITICAL(&s_weight_mux);
+        snap->weight_g = w.grams;
+        snap->weight_raw = w.raw;
+        snap->weight_valid = (w.err == ESP_OK);
+    }
+}
+
+static void weight_task(void *arg)
+{
+    esp_err_t prev_err = ESP_OK;
+    TickType_t last_wake = xTaskGetTickCount();
+    for (;;) {
+        weight_reading_t w = {0};
         xSemaphoreTake(s_hx711_lock, portMAX_DELAY);
-        err = hx711_read_average(CONFIG_HX711_SAMPLES, &snap->weight_raw);
-        if (err == ESP_OK) {
-            snap->weight_g = hx711_raw_to_grams(snap->weight_raw);
+        w.err = hx711_read_average(CONFIG_HX711_SAMPLES, &w.raw);
+        if (w.err == ESP_OK) {
+            w.grams = hx711_raw_to_grams(w.raw);
         }
         xSemaphoreGive(s_hx711_lock);
-        snap->weight_valid = (err == ESP_OK);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "HX711 read failed: %s", esp_err_to_name(err));
+
+        taskENTER_CRITICAL(&s_weight_mux);
+        s_weight = w;
+        taskEXIT_CRITICAL(&s_weight_mux);
+
+        // Log only on change, this runs several times per second
+        if (w.err != prev_err) {
+            if (w.err != ESP_OK) {
+                ESP_LOGW(TAG, "HX711 read failed: %s", esp_err_to_name(w.err));
+            } else {
+                ESP_LOGI(TAG, "HX711 reading again");
+            }
+            prev_err = w.err;
         }
+
+        xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONFIG_WEIGHT_INTERVAL_MS));
     }
 }
 
@@ -119,7 +161,7 @@ esp_err_t sensor_manager_init(void)
     if (err == ESP_OK) {
         hx711_set_scale(CONFIG_HX711_COUNTS_PER_GRAM_X100 / 100.0f);
 #if CONFIG_HX711_TARE_ON_BOOT
-        if (hx711_tare(CONFIG_HX711_SAMPLES) != ESP_OK) {
+        if (hx711_tare(HX711_TARE_SAMPLES) != ESP_OK) {
             ESP_LOGW(TAG, "tare at boot failed, weight will be uncalibrated");
         }
 #endif
@@ -162,7 +204,28 @@ esp_err_t sensor_manager_start(void)
     BaseType_t ok = xTaskCreate(sensor_task, "sensors", SENSOR_TASK_STACK, NULL,
                                 SENSOR_TASK_PRIORITY, &s_task);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "task create failed");
+
+    if (s_weight_available) {
+        ok = xTaskCreate(weight_task, "weight", WEIGHT_TASK_STACK, NULL,
+                         WEIGHT_TASK_PRIORITY, &s_weight_task);
+        ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "weight task create failed");
+    }
     return ESP_OK;
+}
+
+esp_err_t sensor_manager_get_weight(float *grams)
+{
+    ESP_RETURN_ON_FALSE(grams, ESP_ERR_INVALID_ARG, TAG, "grams is NULL");
+    if (!s_weight_available) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    taskENTER_CRITICAL(&s_weight_mux);
+    const weight_reading_t w = s_weight;
+    taskEXIT_CRITICAL(&s_weight_mux);
+    if (w.err == ESP_OK) {
+        *grams = w.grams;
+    }
+    return w.err;
 }
 
 esp_err_t sensor_manager_wait_next(sensor_snapshot_t *out, TickType_t timeout)
@@ -183,7 +246,7 @@ esp_err_t sensor_manager_tare(void)
 {
     ESP_RETURN_ON_FALSE(s_weight_available, ESP_ERR_INVALID_STATE, TAG, "scale not available");
     xSemaphoreTake(s_hx711_lock, portMAX_DELAY);
-    esp_err_t err = hx711_tare(CONFIG_HX711_SAMPLES);
+    esp_err_t err = hx711_tare(HX711_TARE_SAMPLES);
     xSemaphoreGive(s_hx711_lock);
     return err;
 }

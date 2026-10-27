@@ -41,8 +41,22 @@ typedef struct {
  */
 esp_err_t sensor_manager_init(void);
 
-/** @brief Start the sampling task (period CONFIG_SAMPLE_INTERVAL_MS). */
+/**
+ * @brief Start the sampling tasks.
+ *
+ * Climate and distance are sampled every CONFIG_SAMPLE_INTERVAL_MS. The scale
+ * has its own faster task (CONFIG_WEIGHT_INTERVAL_MS); snapshots carry its
+ * latest reading.
+ */
 esp_err_t sensor_manager_start(void);
+
+/**
+ * @brief Latest weight from the fast weight task, without waiting.
+ * @param[out] grams  Calibrated weight in grams (only written on ESP_OK).
+ * @return ESP_OK, ESP_ERR_INVALID_STATE if the scale is not available,
+ *         ESP_ERR_NOT_FOUND before the first reading, or the last read error.
+ */
+esp_err_t sensor_manager_get_weight(float *grams);
 
 /**
  * @brief Block until a new snapshot is available and consume it.

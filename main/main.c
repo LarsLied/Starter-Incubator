@@ -41,20 +41,27 @@ static void log_snapshot(const sensor_snapshot_t *s)
 static void app_task(void *arg)
 {
     sensor_snapshot_t snap;
+    TickType_t last_wake = xTaskGetTickCount();
 
+    // Runs at the weight rate; full snapshots arrive less often
     for (;;) {
-        if (sensor_manager_wait_next(&snap, portMAX_DELAY) != ESP_OK) {
-            continue;
-        }
-        log_snapshot(&snap);
-        ui_show_snapshot(&snap);
+        float grams = 0.0f;
+        const bool weight_ok = (sensor_manager_get_weight(&grams) == ESP_OK);
+        ui_show_weight(weight_ok, grams);
 
-        // ------------------------------------------------------------------
-        // TODO(phase2): application logic goes here, e.g.
-        //   fermentation_update(&snap);
-        //   thermal_control_update(&snap);
-        //   cloud_client_publish_snapshot(&snap);
-        // ------------------------------------------------------------------
+        if (sensor_manager_wait_next(&snap, 0) == ESP_OK) {
+            log_snapshot(&snap);
+            ui_show_snapshot(&snap);
+
+            // --------------------------------------------------------------
+            // TODO(phase2): application logic goes here, e.g.
+            //   fermentation_update(&snap);
+            //   thermal_control_update(&snap);
+            //   cloud_client_publish_snapshot(&snap);
+            // --------------------------------------------------------------
+        }
+
+        xTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONFIG_WEIGHT_INTERVAL_MS));
     }
 }
 

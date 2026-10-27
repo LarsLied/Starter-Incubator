@@ -85,12 +85,23 @@ menu "Sourdough Incubator"
                 Period of the sensor_manager task. Minimum 2000 ms because the
                 DHT22 cannot be read faster than every 2 s.
 
+        config WEIGHT_INTERVAL_MS
+            int "Weight sample interval (ms)"
+            range 100 60000
+            default 200
+            help
+                The scale is read in its own task, independent of
+                SAMPLE_INTERVAL_MS, so the display can follow the weight
+                quickly. The full snapshot still copies the latest weight.
+
         config HX711_SAMPLES
             int "HX711 samples averaged per reading"
             range 1 80
-            default 10
+            default 2
             help
-                With RATE pin low the HX711 runs at 10 SPS, so 10 samples take ~1 s.
+                With RATE pin low the HX711 runs at 10 SPS (100 ms per sample),
+                so keep samples x 100 ms <= WEIGHT_INTERVAL_MS. More samples
+                give less noise but slower updates.
 
         config DISTANCE_SAMPLES
             int "JSN-SR04T samples per reading (median)"
@@ -102,7 +113,7 @@ menu "Sourdough Incubator"
         config HX711_COUNTS_PER_GRAM_X100
             int "HX711 scale factor (raw counts per gram x 100)"
             range 1 100000000
-            default 42000
+            default 165140
             help
                 Kconfig has no floats, so the value is stored x100.
                 Calibrate: tare with empty scale, put a known mass M (g) on it,
